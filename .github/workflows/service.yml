@@ -21,6 +21,10 @@ on:
       resource_group:
         type: string
         default: rg-peaceapp
+      delivery:
+        description: "helm = despliegue directo con helm upgrade (por defecto); gitops = abre un PR de cambio de tag en peaceapp-infra para Argo CD"
+        type: string
+        default: helm
 
 env:
   TRIVY_IMAGE: aquasec/trivy:0.76.2
@@ -184,7 +188,7 @@ jobs:
 
   deploy:
     needs: image
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: inputs.delivery == 'helm' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 15
@@ -218,3 +222,50 @@ jobs:
             -f "infra/deploy/values/$name.yaml" \
             --set image.tag="${GITHUB_REF_NAME#v}" \
             --atomic --timeout 5m
+
+  # Entrega continua GitOps (opcional, delivery: gitops): en vez de desplegar con `helm upgrade`, abre un Pull Request en
+  # peaceapp-infra que cambia el tag de imagen. Argo CD sincroniza el clúster cuando el PR se fusiona.
+  #   push a develop  -> PR a deploy/tags/dev (se fusiona solo cuando pasan los checks)
+  #   tag vX.Y.Z      -> PR a deploy/tags/prod (requiere revisión humana: es la puerta de promoción)
+  # Requiere el secreto INFRA_REPO_TOKEN (PAT de grano fino con contents y pull requests en peaceapp-infra).
+  gitops:
+    needs: [verify, image]
+    if: inputs.delivery == 'gitops' && github.event_name == 'push' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: gitops-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.infra_repo }}
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+      - name: Cambiar el tag y abrir el PR
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          SERVICE: ${{ github.event.repository.name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name="$(echo "$SERVICE" | tr '[:upper:]' '[:lower:]')"
+          if [ "$IS_TAG" = true ]; then env=prod; tag="${REF_NAME#v}"; else env=dev; tag="${VERSION}-dev.${RUN_NUMBER}"; fi
+          file="deploy/tags/$env/$name.yaml"
+          [ -f "$file" ] || { echo "No existe $file en el repo de infraestructura"; exit 1; }
+          branch="bump/$name-$env-$tag"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          printf '# Versión de imagen desplegada en %s. La actualiza el pipeline (dev) o la promoción por PR (prod).\nimage:\n  tag: "%s"\n' "$env" "$tag" > "$file"
+          git add "$file"
+          git commit -m "chore($env): $name $tag"
+          git push origin "$branch"
+          url="$(gh pr create --base main --head "$branch" --title "chore($env): $name $tag" \
+            --body "Actualiza $name a **$tag** en **$env**. Origen: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Argo CD despliega al fusionar; para volver atrás basta revertir este commit.")"
+          echo "PR: $url" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$env" = dev ]; then gh pr merge "$url" --auto --squash; fi

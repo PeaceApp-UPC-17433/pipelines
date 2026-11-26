@@ -24,6 +24,8 @@ jobs:
 
 Servicio Vue: `with: { runtime: node }`.
 
+Para usar la entrega por GitOps en lugar del despliegue directo: `with: { delivery: gitops }` (solo cuando Argo CD esté instalado en el clúster y exista `INFRA_REPO_TOKEN`).
+
 ## Qué hace
 
 | Job | Bloquea |
@@ -31,7 +33,8 @@ Servicio Vue: `with: { runtime: node }`.
 | verify | pruebas, gate de JaCoCo y quality gate de SonarCloud |
 | security | Gitleaks y Trivy (HIGH y CRITICAL con parche disponible) |
 | image | Trivy sobre la imagen; publica en GHCR solo en push |
-| deploy | solo en tag `vX.Y.Z`: `helm upgrade --atomic` con el chart de `peaceapp-infra` |
+| deploy | por defecto (delivery: helm), solo en tag X.Y.Z: helm upgrade --atomic con el chart de peaceapp-infra |
+| gitops | opcional (delivery: gitops): abre un PR en peaceapp-infra que cambia deploy/tags/<env>/<servicio>.yaml. develop actualiza dev (auto-merge) y el tag X.Y.Z propone prod (requiere revisión). Argo CD sincroniza al fusionar; el rollback es revertir el commit. Requiere el secreto INFRA_REPO_TOKEN. |
 
 ## Etiquetas de imagen
 
