@@ -182,39 +182,49 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
 
-  deploy:
-    needs: image
-    if: startsWith(github.ref, 'refs/tags/v')
+  # Entrega continua GitOps: en vez de desplegar con `helm upgrade`, el pipeline abre un Pull Request en
+  # peaceapp-infra que cambia el tag de imagen. Argo CD sincroniza el clúster cuando el PR se fusiona.
+  #   push a develop  -> PR a deploy/tags/dev (se fusiona solo cuando pasan los checks)
+  #   tag vX.Y.Z      -> PR a deploy/tags/prod (requiere revisión humana: es la puerta de promoción)
+  # Requiere el secreto INFRA_REPO_TOKEN (PAT de grano fino con contents y pull requests en peaceapp-infra).
+  gitops:
+    needs: [verify, image]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 15
+    timeout-minutes: 10
     concurrency:
-      group: deploy-${{ github.repository }}
+      group: gitops-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ inputs.infra_repo }}
-          path: infra
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - uses: azure/aks-set-context@883bdc8d8d1d0fd87e66cc4ba6f0b618f9eb5281 # v5
-        with:
-          cluster-name: ${{ inputs.aks_name }}
-          resource-group: ${{ inputs.resource_group }}
-          admin: "true"
-      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
-      - name: Deploy
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+      - name: Cambiar el tag y abrir el PR
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          SERVICE: ${{ github.event.repository.name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          name="$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')"
-          helm upgrade --install "$name" infra/charts/service \
-            --namespace ${{ inputs.namespace }} \
-            -f "infra/deploy/values/$name.yaml" \
-            --set image.tag="${GITHUB_REF_NAME#v}" \
-            --atomic --timeout 5m
+          set -euo pipefail
+          name="$(echo "$SERVICE" | tr '[:upper:]' '[:lower:]')"
+          if [ "$IS_TAG" = true ]; then env=prod; tag="${REF_NAME#v}"; else env=dev; tag="${VERSION}-dev.${RUN_NUMBER}"; fi
+          file="deploy/tags/$env/$name.yaml"
+          [ -f "$file" ] || { echo "No existe $file en el repo de infraestructura"; exit 1; }
+          branch="bump/$name-$env-$tag"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          printf '# Versión de imagen desplegada en %s. La actualiza el pipeline (dev) o la promoción por PR (prod).\nimage:\n  tag: "%s"\n' "$env" "$tag" > "$file"
+          git add "$file"
+          git commit -m "chore($env): $name $tag"
+          git push origin "$branch"
+          url="$(gh pr create --base main --head "$branch" --title "chore($env): $name $tag" \
+            --body "Actualiza $name a **$tag** en **$env**. Origen: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Argo CD despliega al fusionar; para volver atrás basta revertir este commit.")"
+          echo "PR: $url" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$env" = dev ]; then gh pr merge "$url" --auto --squash; fi
