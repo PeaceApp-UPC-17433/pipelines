@@ -17,7 +17,7 @@ on:
         default: peaceapp
       aks_name:
         type: string
-        default: aks-peaceapp
+        default: aks-peaceapp-v2
       resource_group:
         type: string
         default: rg-peaceapp
