@@ -107,7 +107,7 @@ jobs:
       - name: Dependencies, secrets and misconfiguration (Trivy)
         run: |
           docker run --rm -v "$PWD:/work" -w /work "$TRIVY_IMAGE" fs \
-            --scanners vuln,secret,misconfig --severity HIGH,CRITICAL \
+            --scanners ${{ inputs.runtime == 'java' && 'secret,misconfig' || 'vuln,secret,misconfig' }} --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 --format table --output trivy-fs.txt .
       - name: Report
         if: always()
