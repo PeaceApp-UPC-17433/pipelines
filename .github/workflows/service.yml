@@ -21,6 +21,10 @@ on:
       resource_group:
         type: string
         default: rg-peaceapp
+      delivery:
+        description: "helm = despliegue directo con helm upgrade (por defecto); gitops = abre un PR de cambio de tag en peaceapp-infra para Argo CD"
+        type: string
+        default: helm
 
 env:
   TRIVY_IMAGE: aquasec/trivy:0.76.2
@@ -182,14 +186,51 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
 
-  # Entrega continua GitOps: en vez de desplegar con `helm upgrade`, el pipeline abre un Pull Request en
+  deploy:
+    needs: image
+    if: inputs.delivery == 'helm' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    concurrency:
+      group: deploy-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.infra_repo }}
+          path: infra
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/aks-set-context@883bdc8d8d1d0fd87e66cc4ba6f0b618f9eb5281 # v5
+        with:
+          cluster-name: ${{ inputs.aks_name }}
+          resource-group: ${{ inputs.resource_group }}
+          admin: "true"
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
+      - name: Deploy
+        run: |
+          name="$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')"
+          helm upgrade --install "$name" infra/charts/service \
+            --namespace ${{ inputs.namespace }} \
+            -f "infra/deploy/values/$name.yaml" \
+            --set image.tag="${GITHUB_REF_NAME#v}" \
+            --atomic --timeout 5m
+
+  # Entrega continua GitOps (opcional, delivery: gitops): en vez de desplegar con `helm upgrade`, abre un Pull Request en
   # peaceapp-infra que cambia el tag de imagen. Argo CD sincroniza el clúster cuando el PR se fusiona.
   #   push a develop  -> PR a deploy/tags/dev (se fusiona solo cuando pasan los checks)
   #   tag vX.Y.Z      -> PR a deploy/tags/prod (requiere revisión humana: es la puerta de promoción)
   # Requiere el secreto INFRA_REPO_TOKEN (PAT de grano fino con contents y pull requests en peaceapp-infra).
   gitops:
     needs: [verify, image]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+    if: inputs.delivery == 'gitops' && github.event_name == 'push' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
