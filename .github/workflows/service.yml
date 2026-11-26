@@ -157,8 +157,10 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Image scan (Trivy)
         run: |
+          touch .trivyignore
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" "$TRIVY_IMAGE" image \
             --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            --ignorefile /out/.trivyignore \
             --format table --output /out/trivy-image.txt scan:ci
       - name: Report
         if: always()
