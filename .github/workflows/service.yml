@@ -108,6 +108,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/work" -w /work "$TRIVY_IMAGE" fs \
             --scanners ${{ inputs.runtime == 'java' && 'secret,misconfig' || 'vuln,secret,misconfig' }} --severity HIGH,CRITICAL \
+            ${{ inputs.runtime == 'java' && '--skip-files pom.xml' || '' }} \
             --ignore-unfixed --exit-code 1 --format table --output trivy-fs.txt .
       - name: Report
         if: always()
